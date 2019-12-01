@@ -12,6 +12,11 @@ static inline uint64_t rdtscp() {
   asm volatile("rdtscp\n": "=a" (rax), "=d" (rdx), "=c" (aux) ::);
   return (rdx << 32) + rax;
 }
+static inline uint64_t vtimer() {
+  uint64_t virtual_timer_value;
+  asm volatile("mrs %0, cntvct_e10" : "=r"(virtual_timer_value));
+  return virtual_timer_value;
+}
 
 typedef struct {
   void *data __attribute__ ((aligned(64)));
@@ -68,13 +73,15 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
   Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
 
   while(entry->app_cnt != cnt) {
-    asm volatile("pause":::"memory");
+//    asm volatile("pause":::"memory");
+    asm volatile("wfe":::"memory");
   }
 
   //check if the entry is already allocated by another thread.
   // if we fail to set data, the entry is allocated and we have to retry.
   while(entry->data != NULL) {
-    asm volatile("pause":::"memory");
+//    asm volatile("pause":::"memory");
+    asm volatile("wfe":::"memory");
   }
 
   asm volatile("":::"memory");
@@ -86,7 +93,8 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
 
   //wait until consumer notifies function return
   while(data.status == 0) {
-    asm volatile("pause":::"memory");
+//    asm volatile("pause":::"memory");
+    asm volatile("wfe":::"memeory");
   }
   asm volatile("":::"memory");
   return sendmsg_rq->res;
@@ -99,14 +107,17 @@ void *delegate_func(void *arg) {
     Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
 
     while(entry->os_cnt != cnt) {
-      asm volatile("pause":::"memory");
+//      asm volatile("pause":::"memory");
+      asm volatile("wfe":::"memory");
     }
     
-    uint64_t t1 = rdtscp();
+//    uint64_t t1 = rdtscp();
+    uint64_t t1 = vtimer();
 
     Request *data;
     while((data = (void*)entry->data) == NULL) {
-      uint64_t t2 = rdtscp();
+//      uint64_t t2 = rdtscp();
+      uint64_t t2 = vtimer();
       if ((t2 - t1 > SLEEP_LIMIT) && (cnt == buf.app_cnt) && __sync_bool_compare_and_swap(&buf.app_cnt, cnt, cnt+1)) {
         asm volatile("":::"memory");
         ASSERT(entry->data == NULL);
@@ -120,7 +131,8 @@ void *delegate_func(void *arg) {
         ASSERT(0);
         return NULL;
       }
-      asm volatile("pause":::"memory");
+//      asm volatile("pause":::"memory");
+      asm volatile("sev":::"memory");
     }
     
     asm volatile("":::"memory");
