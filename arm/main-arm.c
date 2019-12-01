@@ -14,7 +14,7 @@ static inline uint64_t rdtscp() {
 }
 static inline uint64_t vtimer() {
   uint64_t virtual_timer_value;
-  asm volatile("mrs %0, cntvct_e10" : "=r"(virtual_timer_value));
+  asm volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));
   return virtual_timer_value;
 }
 
@@ -94,7 +94,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
   //wait until consumer notifies function return
   while(data.status == 0) {
 //    asm volatile("pause":::"memory");
-    asm volatile("wfe":::"memeory");
+    asm volatile("wfe":::"memory");
   }
   asm volatile("":::"memory");
   return sendmsg_rq->res;
