@@ -132,7 +132,7 @@ void *delegate_func(void *arg) {
         return NULL;
       }
 //      asm volatile("pause":::"memory");
-      asm volatile("sev":::"memory");
+      asm volatile("wfe":::"memory");
     }
     
     asm volatile("":::"memory");
