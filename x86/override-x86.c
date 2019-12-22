@@ -3,6 +3,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#define __USE_GNU
+#include <dlfcn.h>
 
 #define ASSERT(x) if (!(x)) {fprintf(stderr, "failed(%d)\n", __LINE__); _exit(1);}
 
@@ -12,11 +14,6 @@ static inline uint64_t rdtscp() {
   asm volatile("rdtscp\n": "=a" (rax), "=d" (rdx), "=c" (aux) ::);
   return (rdx << 32) + rax;
 }
-static inline uint64_t vtimer() {
-  uint64_t virtual_timer_value;
-  asm volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));
-  return virtual_timer_value;
-}
 
 typedef struct {
   void *data __attribute__ ((aligned(64)));
@@ -25,10 +22,10 @@ typedef struct {
 } Entry;
 
 #ifndef RINGBUFFER_ENTRY_NUM
-#define RINGBUFFER_ENTRY_NUM 24
+#define RINGBUFFER_ENTRY_NUM 256
 #endif
 
-#define OS_CORE_LIMIT 12
+#define OS_CORE_LIMIT 32
 
 #define SLEEP_LIMIT 100000000
 
@@ -61,6 +58,7 @@ int delegate_stop = 0;
 
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
 ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
+  //puts("sendmsg");
   Request data;
   SendMsgRequest *sendmsg_rq = &data.arguments.sendmsg;
   data.status = 0;
@@ -73,15 +71,13 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
   Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
 
   while(entry->app_cnt != cnt) {
-//    asm volatile("pause":::"memory");
-    asm volatile("wfe":::"memory");
+    asm volatile("pause":::"memory");
   }
 
   //check if the entry is already allocated by another thread.
   // if we fail to set data, the entry is allocated and we have to retry.
   while(entry->data != NULL) {
-//    asm volatile("pause":::"memory");
-    asm volatile("wfe":::"memory");
+    asm volatile("pause":::"memory");
   }
 
   asm volatile("":::"memory");
@@ -93,8 +89,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
 
   //wait until consumer notifies function return
   while(data.status == 0) {
-//    asm volatile("pause":::"memory");
-    asm volatile("wfe":::"memory");
+    asm volatile("pause":::"memory");
   }
   asm volatile("":::"memory");
   return sendmsg_rq->res;
@@ -102,22 +97,20 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
 
 void *delegate_func(void *arg);
 void *delegate_func(void *arg) {
+  puts("delegate_func");
   while(1) {
     uint64_t cnt = __sync_fetch_and_add(&buf.os_cnt, 1);
     Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
 
     while(entry->os_cnt != cnt) {
-//      asm volatile("pause":::"memory");
-      asm volatile("wfe":::"memory");
+      asm volatile("pause":::"memory");
     }
     
-//    uint64_t t1 = rdtscp();
-    uint64_t t1 = vtimer();
+    uint64_t t1 = rdtscp();
 
     Request *data;
     while((data = (void*)entry->data) == NULL) {
-//      uint64_t t2 = rdtscp();
-      uint64_t t2 = vtimer();
+      uint64_t t2 = rdtscp();
       if ((t2 - t1 > SLEEP_LIMIT) && (cnt == buf.app_cnt) && __sync_bool_compare_and_swap(&buf.app_cnt, cnt, cnt+1)) {
         asm volatile("":::"memory");
         ASSERT(entry->data == NULL);
@@ -131,8 +124,7 @@ void *delegate_func(void *arg) {
         ASSERT(0);
         return NULL;
       }
-//      asm volatile("pause":::"memory");
-      asm volatile("sev":::"memory");
+      asm volatile("pause":::"memory");
     }
     
     asm volatile("":::"memory");
@@ -146,7 +138,8 @@ void *delegate_func(void *arg) {
     case REQUEST_TYPE_SENDMSG:
       do {
         SendMsgRequest *sendmsg_rq = &data->arguments.sendmsg;
-        sendmsg_rq->res = sendmsg(sendmsg_rq->sockfd, sendmsg_rq->msg, sendmsg_rq->flags);
+        ssize_t (*origsendmsg)(int, const struct msghdr*, int) = dlsym(RTLD_NEXT, "sendmsg");
+        sendmsg_rq->res = origsendmsg(sendmsg_rq->sockfd, sendmsg_rq->msg, sendmsg_rq->flags);
       } while (0);
       break;
     }
@@ -176,4 +169,15 @@ void delegate_init(void) {
     e->app_cnt = i;
     e->os_cnt = i;
   }
+}
+
+pthread_t t1,t2;
+
+__attribute__((constructor))
+static void constructor() {
+  delegate_init();
+  pthread_create(&t1, NULL, delegate_func, NULL);
+  pthread_create(&t2, NULL, delegate_func, NULL);
+  pthread_detach(t1);
+  pthread_detach(t2);
 }
