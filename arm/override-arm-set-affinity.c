@@ -5,6 +5,8 @@
 #include <unistd.h>
 #define __USE_GNU
 #include <dlfcn.h>
+#define __GNU__SOURCE
+#include <sched.h>
 
 #define ASSERT(x) if (!(x)) {fprintf(stderr, "failed(%d)\n", __LINE__); _exit(1);}
 
@@ -176,9 +178,13 @@ pthread_t threads[THREAD_NUM];
 
 __attribute__((constructor))
 static void constructor() {
+  cpu_set_t cpu_set;
   delegate_init();
   for (int i = 0; i < THREAD_NUM; i++) {
+    CPU_ZERO(&cpu_set);
+    CPU_SET(i,&cpu_set);
     pthread_create(&threads[i], NULL, delegate_func, NULL);
+    pthread_setaffinity_np(threads[i], sizeof(cpu_set_t), &cpu_set);
   }
   for (int i = 0; i < THREAD_NUM; i++) {
     pthread_detach(threads[i]);
