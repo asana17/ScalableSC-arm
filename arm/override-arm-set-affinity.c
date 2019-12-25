@@ -1,11 +1,10 @@
+#define _GNU_SOURCE
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
-#define __USE_GNU
 #include <dlfcn.h>
-#define __GNU__SOURCE
 #include <sched.h>
 
 #define ASSERT(x) if (!(x)) {fprintf(stderr, "failed(%d)\n", __LINE__); _exit(1);}
