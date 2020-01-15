@@ -36,35 +36,34 @@ typedef struct {
 } RingBuffer;
 RingBuffer buf;
 
+
+
 typedef struct {
-  const struct msghdr *msg;
-  ssize_t res;
-  int sockfd;
-  int flags;
-} SendMsgRequest;
+  int flag;
+  pid_t res;
+} GetpidRequest;
 
 typedef struct {
   int status;
   int type;
 
   union {
-    SendMsgRequest sendmsg;
+    GetpidRequest getpid;
   } arguments;
 } Request;
 
 int delegate_stop = 0;
 
-#define REQUEST_TYPE_SENDMSG 0
+#define REQUEST_TYPE_GETPID 0
 
-ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
-ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
+
+pid_t getpid();
+pid_t getpid(){
   Request data;
-  SendMsgRequest *sendmsg_rq = &data.arguments.sendmsg;
+  GetpidRequest *getpid_rq= &data.arguments.getpid;
   data.status = 0;
-  data.type = REQUEST_TYPE_SENDMSG;
-  sendmsg_rq->sockfd = sockfd;
-  sendmsg_rq->msg = msg;
-  sendmsg_rq->flags = flags;
+  data.type= REQUEST_TYPE_GETPID;
+  getpid_rq->flag = 1;
 
   uint64_t cnt = __sync_fetch_and_add(&buf.app_cnt, 1);
   Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
@@ -92,7 +91,7 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
     asm volatile("wfe":::"memory");
   }
   asm volatile("":::"memory");
-  return sendmsg_rq->res;
+  return getpid_rq->res;
 }
 
 void *delegate_func(void *arg);
@@ -130,17 +129,18 @@ void *delegate_func(void *arg) {
     
     asm volatile("":::"memory");
     entry->data = NULL;
+    asm volatile("sev":::"memory");
 
     asm volatile("":::"memory");
     entry->os_cnt += RINGBUFFER_ENTRY_NUM;
     asm volatile("":::"memory");
 
-    switch(data->type) {
-    case REQUEST_TYPE_SENDMSG:
+   switch(data->type) {
+    case REQUEST_TYPE_GETPID:
       do {
-        SendMsgRequest *sendmsg_rq = &data->arguments.sendmsg;
-        ssize_t (*origsendmsg)(int, const struct msghdr*, int) = dlsym(RTLD_NEXT, "sendmsg");
-        sendmsg_rq->res = origsendmsg(sendmsg_rq->sockfd, sendmsg_rq->msg, sendmsg_rq->flags);
+        GetpidRequest *getpid_rq= &data->arguments.getpid;
+        pid_t (*origgetpid)()= dlsym(RTLD_NEXT, "getpid");
+        getpid_rq->res = origgetpid();
       } while (0);
       break;
     }
@@ -149,6 +149,7 @@ void *delegate_func(void *arg) {
 
     //notify function return to producer
     data->status = 1;
+    asm volatile("sev":::"memory");
 
     continue;
 
@@ -181,7 +182,7 @@ static void constructor() {
   delegate_init();
   for (int i = 0; i < THREAD_NUM; i++) {
     CPU_ZERO(&cpu_set);
-    CPU_SET(i,&cpu_set);
+    CPU_SET(19-i,&cpu_set);
     pthread_create(&threads[i], NULL, delegate_func, NULL);
     pthread_setaffinity_np(threads[i], sizeof(cpu_set_t), &cpu_set);
   }

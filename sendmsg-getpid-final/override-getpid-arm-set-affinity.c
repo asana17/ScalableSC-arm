@@ -1,18 +1,18 @@
+#define _GNU_SOURCE
 #include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
-#define __USE_GNU
 #include <dlfcn.h>
+#include <sched.h>
 
 #define ASSERT(x) if (!(x)) {fprintf(stderr, "failed(%d)\n", __LINE__); _exit(1);}
 
-static inline uint64_t rdtscp() {
-  uint32_t aux;
-  uint64_t rax, rdx;
-  asm volatile("rdtscp\n": "=a" (rax), "=d" (rdx), "=c" (aux) ::);
-  return (rdx << 32) + rax;
+static inline uint64_t vtimer() {
+  uint64_t virtual_timer_value;
+  asm volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));
+  return virtual_timer_value;
 }
 
 typedef struct {
@@ -36,48 +36,47 @@ typedef struct {
 } RingBuffer;
 RingBuffer buf;
 
+
+
 typedef struct {
-  const struct msghdr *msg;
-  ssize_t res;
-  int sockfd;
-  int flags;
-} SendMsgRequest;
+  int flag;
+  pid_t res;
+} GetpidRequest;
 
 typedef struct {
   int status;
   int type;
 
   union {
-    SendMsgRequest sendmsg;
+    GetpidRequest getpid;
   } arguments;
 } Request;
 
 int delegate_stop = 0;
 
-#define REQUEST_TYPE_SENDMSG 0
+#define REQUEST_TYPE_GETPID 0
 
-ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags);
-ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
-  //puts("sendmsg");
+
+pid_t getpid();
+pid_t getpid(){
   Request data;
-  SendMsgRequest *sendmsg_rq = &data.arguments.sendmsg;
+  GetpidRequest *getpid_rq= &data.arguments.getpid;
   data.status = 0;
-  data.type = REQUEST_TYPE_SENDMSG;
-  sendmsg_rq->sockfd = sockfd;
-  sendmsg_rq->msg = msg;
-  sendmsg_rq->flags = flags;
+  data.type= REQUEST_TYPE_GETPID;
+  getpid_rq->flag = 1;
 
   uint64_t cnt = __sync_fetch_and_add(&buf.app_cnt, 1);
   Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
+  asm volatile("sev":::"memory");
 
   while(entry->app_cnt != cnt) {
-    asm volatile("pause":::"memory");
+    asm volatile("wfe":::"memory");
   }
 
   //check if the entry is already allocated by another thread.
   // if we fail to set data, the entry is allocated and we have to retry.
   while(entry->data != NULL) {
-    asm volatile("pause":::"memory");
+    asm volatile("wfe":::"memory");
   }
 
   asm volatile("":::"memory");
@@ -89,28 +88,40 @@ ssize_t sendmsg(int sockfd, const struct msghdr *msg, int flags) {
 
   //wait until consumer notifies function return
   while(data.status == 0) {
-    asm volatile("pause":::"memory");
+    asm volatile("wfe":::"memory");
   }
   asm volatile("":::"memory");
-  return sendmsg_rq->res;
+  return getpid_rq->res;
 }
+
+#define THREAD_NUM 4
 
 void *delegate_func(void *arg);
 void *delegate_func(void *arg) {
-  puts("delegate_func");
+  pthread_t thread;
+  cpu_set_t cpu_set;
+  CPU_ZERO(&cpu_set);
+  for (int i = 0; i < THREAD_NUM; i++) {
+    int j = 19 - i;
+    CPU_SET(j, &cpu_set);
+  }
+  thread = pthread_self();
+  pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpu_set);
+
   while(1) {
     uint64_t cnt = __sync_fetch_and_add(&buf.os_cnt, 1);
     Entry *const entry = &buf.entry[cnt % RINGBUFFER_ENTRY_NUM];
+    asm volatile("sev":::"memory");
 
     while(entry->os_cnt != cnt) {
-      asm volatile("pause":::"memory");
+      asm volatile("wfe":::"memory");
     }
     
-    uint64_t t1 = rdtscp();
+    uint64_t t1 = vtimer();
 
     Request *data;
     while((data = (void*)entry->data) == NULL) {
-      uint64_t t2 = rdtscp();
+      uint64_t t2 = vtimer();
       if ((t2 - t1 > SLEEP_LIMIT) && (cnt == buf.app_cnt) && __sync_bool_compare_and_swap(&buf.app_cnt, cnt, cnt+1)) {
         asm volatile("":::"memory");
         ASSERT(entry->data == NULL);
@@ -124,22 +135,23 @@ void *delegate_func(void *arg) {
         ASSERT(0);
         return NULL;
       }
-      asm volatile("pause":::"memory");
+      asm volatile("wfe":::"memory");
     }
     
     asm volatile("":::"memory");
     entry->data = NULL;
+    asm volatile("sev":::"memory");
 
     asm volatile("":::"memory");
     entry->os_cnt += RINGBUFFER_ENTRY_NUM;
     asm volatile("":::"memory");
 
-    switch(data->type) {
-    case REQUEST_TYPE_SENDMSG:
+   switch(data->type) {
+    case REQUEST_TYPE_GETPID:
       do {
-        SendMsgRequest *sendmsg_rq = &data->arguments.sendmsg;
-        ssize_t (*origsendmsg)(int, const struct msghdr*, int) = dlsym(RTLD_NEXT, "sendmsg");
-        sendmsg_rq->res = origsendmsg(sendmsg_rq->sockfd, sendmsg_rq->msg, sendmsg_rq->flags);
+        GetpidRequest *getpid_rq= &data->arguments.getpid;
+        pid_t (*origgetpid)()= dlsym(RTLD_NEXT, "getpid");
+        getpid_rq->res = origgetpid();
       } while (0);
       break;
     }
@@ -148,6 +160,7 @@ void *delegate_func(void *arg) {
 
     //notify function return to producer
     data->status = 1;
+    asm volatile("sev":::"memory");
 
     continue;
 
@@ -170,16 +183,28 @@ void delegate_init(void) {
     e->os_cnt = i;
   }
 }
-#define THREAD_NUM 12
+
 pthread_t threads[THREAD_NUM];
 
 __attribute__((constructor))
 static void constructor() {
+  cpu_set_t cpu_set;
   delegate_init();
   for (int i = 0; i < THREAD_NUM; i++) {
+   // CPU_ZERO(&cpu_set);
+    //int j = 19-i;
+    //CPU_SET(j,&cpu_set);
     pthread_create(&threads[i], NULL, delegate_func, NULL);
+    //pthread_setaffinity_np(threads[i], sizeof(cpu_set_t), &cpu_set);
   }
   for (int i = 0; i < THREAD_NUM; i++) {
     pthread_detach(threads[i]);
   }
+  pid_t pid;
+  pid = getpid();
+  CPU_ZERO(&cpu_set);
+  for (int i = 0; i < 12; i++) {
+    CPU_SET(i, &cpu_set);
+  }
+  sched_setaffinity(pid, sizeof(cpu_set_t), &cpu_set);
 }
